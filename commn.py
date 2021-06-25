@@ -3,7 +3,6 @@ import inspect, traceback, keyboard
 
 servers = list()
 emmA = False
-
 def encode(data):
     return bytes(data+"|", "utf-8")
 
@@ -38,6 +37,7 @@ def emmAbort():
         t.start()
         emmA = True
 
+
 class SocketServer():
     def __init__(self, HOST="127.0.0.1", PORT=8000):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -47,6 +47,7 @@ class SocketServer():
         #self.conns = dict()
         self.consumers = dict()
         servers.append(self)
+        self.nonDir = SocketConsumer(server=self, DIR="") # For non direction
 
     def _thConn(self):
         t = threading.Thread(target=self._connGK, args=())
@@ -58,12 +59,13 @@ class SocketServer():
         except OSError:
             return None
         self._thConn()
-        #self.conns[conn] = addr
+
         DIR = decode(conn.recv(1024))[0]
         if not DIR in self.consumers:
-            self.send(conn, "The direction {DIR} does not exists")
+            self.send(conn, f"The direction {DIR} does not exists")
             self.reject(conn)
             return None
+
         self.consumers[DIR].conns[conn] = addr
         self.connect(conn, DIR)
         self.consumers[DIR].connect(conn)
@@ -156,6 +158,9 @@ class SocketClient(): # ConnectionAbortedError, ConnectionRefusedError
         self.connect()
 
     def _mIn(self):
+        #cprivpass = 3
+        #cpublpass = en(cprivpass)
+
         while True:
             try:
                 message = decode(self.sock.recv(1024))
