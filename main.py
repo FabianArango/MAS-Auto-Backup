@@ -1,103 +1,98 @@
-import os, time, json
-from commn import SocketServer, SocketConsumer, emmAbort
-from pydrive.auth import GoogleAuth
-from pydrive.drive import GoogleDrive
+import psutil, threading, os, shutil
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 
 
-class BackgroundApp():
-    def __init__(self):
-        gauth = GoogleAuth()
-        gauth.LocalWebserverAuth()
-        self.gdrive = GoogleDrive(gauth)
+class BackupEvent(FileSystemEventHandler):
+    def __init__(self, lcl, bak, exe, ver):
+        self.lcl = lcl
+        self.bak = bak
+        self.exe = exe
+        self.ver = ver
+        self.fScan = False
 
-        self.server = SocketServer(HOST="127.0.0.1", PORT=3452)
-        self.masConsumer = SocketConsumer(self.server, DIR="MAS")
-        self.masConsumer.connect = lambda conn: print("MAS connected successfully")
-        self.masConsumer.disconnect = lambda conn: self.backup(
-            r"C:\Users\Lenovo-PC\Desktop\scripts\deactivableGUI\backUpFolder", 
-            "1wX9N7pQ6ZlI5G4gUeTCLltdB0seu5giO",
-            forced=("alwaysRe.txt", "alwaysRe2.txt")
-        )
+        self.obs = Observer()
+        self.obs.schedule(self, path=self.lcl, recursive=False)
+        self.obs.start()
 
-        self.guiConsumer = SocketConsumer(self.server, DIR="GUI/upload")
-        self.guiConsumer.connect = lambda conn: print("GUI connected successfully")
-        self.guiConsumer.disconnect = lambda conn: print("GUI disconnected successfully")
+    def on_any_event(self, event):
+        if not self.fScan:
+            self.fScan = self.procExist()
 
-    def backup(self, path, dId, forced=None, banned=None):
-        tic = time.process_time()
-        
-        if forced == None:
-            forced = tuple()
-        
-        if banned == None:
-            banned = tuple()
+    def procExist(self):
+        var = False
+        for proc in psutil.process_iter(['pid', 'exe']):
+            if proc.info["exe"] == self.exe:
+                proc = psutil.Process(proc.info["pid"])
+                t = threading.Thread(target=self.onProcClose, args=(proc, ))
+                t.start()
+                var = True
+                break
+        return var
 
-        localFiles = os.listdir(path)
-        driveFiles = self.gdrive.ListFile({'q': f"'{dId}' in parents and trashed=false"}).GetList()
-        driveList = [f["title"] for f in driveFiles]
+    def onProcClose(self, proc):
+        proc.wait()
+        t = self.procExist()
+        if not t:
+            self.backup()
+            self.fScan = False
 
-        print("-"*60)
-        print("Local Files:   ", localFiles)
-        print("Drive Files:   ", driveList)
-        print("Forced Files:  ", forced)
-        print("Banned Files:  ", banned)
-
-        self.guiConsumer.send(json.dumps({"command": "start", "value": 10}))
-
-        upFiles = list()
-        for file in localFiles:
-            if not file in banned and (not file in driveList or file in forced):
-                df = self.gdrive.CreateFile({"title": file, "parents": [{"id": dId}]})
-                df.SetContentFile(path+"\\"+file)
-                df.Upload()
-                upFiles.append(file)
-                self.sendtoGui(file, "Uploading Files")
-        print("Uploaded Files:", upFiles)
-
-        self.guiConsumer.send(json.dumps({"command": "start", "value": 10}))
-        trFiles = list()
-        for file in driveFiles: 
-            if not file["title"] in localFiles:
-                # Only delete gdrive the files that are not in local
-                file.Trash()
-                trFiles.append(file["title"])
-                self.sendtoGui(file["title"], "Trashing Files")
-
-        # The list needs to be created again to have all the uploaded files
-        driveFiles = self.gdrive.ListFile({'q': f"'{dId}' in parents and trashed=false"}).GetList() 
-        driveFiles = sorted(driveFiles, key = lambda e: (e["title"], e["createdDate"]))
-        driveList = [f["title"] for f in driveFiles]
-        print("Drive Files:   ", driveList)
-
-        self.guiConsumer.send(json.dumps({"command": "start", "value": 10}))
-        i = 1
-        while i < len(driveFiles):
-            file = driveFiles[i]
-            lastFile = driveFiles[i-1]
-            if file["title"] == lastFile["title"]:
-                # Delete the older duplicates
-                lastFile.Trash()
-                trFiles.append(lastFile["title"])
-                self.sendtoGui(lastFile["title"], "Trashing duplicates")
-            i += 1
-        print("Thrased Files: ", trFiles)
-
-        toc = time.process_time()
-        self.guiConsumer.send(json.dumps({"command": "end", "value": None}))
-        print("Completed in:  ", toc-tic)
-
-    def sendtoGui(self, file, process):
-        self.guiConsumer.send(json.dumps({    
-            "command": "file",
-            "value": {
-                "filename": file,
-                "process": process
+    def backup(self):
+        """
+        This maybe is a draft
+        """
+        """
+        root {
+            0: {1.txt, 2.txt},
+            1: {2.txt},
+            2: {3.txt},
+            ref.json: {
+                0: {1.txt, self}, {2.txt, self},
+                1: {1.txt, 0}, {2.txt, self},
+                2: {3.txt, self}
             }
-        }))
+        }
+        """
+        print("backup", self.exe)
+        rootbak = self.bak+"\\"+self.lcl.split("\\")[-1]
+        print(rootbak)
+        if not os.path.isdir(rootbak):
+            print("not folder name in")
+            os.mkdir(rootbak)
+        
+        bakdir = rootbak+"\\"+str(self.ver)
+        os.mkdir(bakdir)
 
-def main():
-    emmAbort()
-    bgApp = BackgroundApp()
+        for filename in os.listdir(self.lcl):
+            shutil.copyfile(self.lcl+"\\"+filename, bakdir+"\\"+filename)
+
+        """
+        for each file in lcl:
+            if not file in backup or file was modified:
+                the file is uploaded
+        The back up data is given by the ref.json file
+        """
+        
+        #The data base is updated and the version is incremmented by 1
+
+    def destroy(self):
+        self.obs.stop()
+        self.obs.join()
 
 if __name__ == "__main__":
-    main()
+    b = BackupEvent(
+        r"C:\Users\Lenovo-PC\Desktop\scripts\AutoBackup\wathF",
+        r"C:\Users\Lenovo-PC\Desktop\backup",
+        r"C:\Program Files\Notepad++\notepad++.exe",
+        1
+        )
+    while True:
+        try:
+            val = input("")
+            if val == "bak":
+                b.backup()
+            else:
+                print("Try again")
+        except KeyboardInterrupt:
+            break
+    b.destroy()
