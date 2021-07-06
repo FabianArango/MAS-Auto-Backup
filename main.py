@@ -1,11 +1,22 @@
-import os, json
+import sys, os, django
+sys.dont_write_bytecode = True 
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "settings") 
+django.setup()
+
+from db import models
+
+# TODO: check the forced files was cleaned after each bakup
+
+import json
 from pydrive.auth import GoogleAuth
 from pydrive.drive import GoogleDrive
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 gauth = GoogleAuth()
 gauth.LocalWebserverAuth()
 gdrive = GoogleDrive(gauth)
 
-def backup(path, gid, ref, ver, lastref, forced):
+def backup(path, gid, ref, lastref, ver, forced):
     for filename in os.listdir(path):
         print(filename)
         if os.path.isdir(path+"\\"+filename):
@@ -19,10 +30,10 @@ def backup(path, gid, ref, ver, lastref, forced):
 
             ref[filename] = {"gid": gfolder["id"], "subFiles": {}}
             if filename in lastref and "subFiles" in lastref[filename]: # The folder it's in the prev bak and not present changes
-                backup(path+"\\"+filename, gfolder["id"], ref[filename]["subFiles"], ver, lastref[filename]["subFiles"], forced)
+                backup(path+"\\"+filename, gfolder["id"], ref[filename]["subFiles"], lastref[filename]["subFiles"], ver, forced)
 
             else:
-                backup(path+"\\"+filename, gfolder["id"], ref[filename]["subFiles"], ver, {}, forced)
+                backup(path+"\\"+filename, gfolder["id"], ref[filename]["subFiles"], {}, ver, forced)
 
         else:
             """
@@ -42,40 +53,116 @@ def backup(path, gid, ref, ver, lastref, forced):
 
                 ref[filename] = {"gid": gfile["id"], "ver": ver}
 
+def getref(gid, ver):
+    prevFol = gdrive.ListFile({'q': f"'{gid}' in parents and trashed=false and title='{ver}'"}).GetList()
+    if prevFol:
+        prevFol = prevFol[0]["id"]
+        lastref = gdrive.ListFile({'q': f"'{prevFol}' in parents and trashed=false and title='ref.json'"}).GetList()
+        if lastref:
+            lastref = lastref[0].GetContentString()
+            if lastref:
+                lastref = json.loads(lastref)
+                return lastref
+    return dict()
+
+def getDriveFileByName(gid, name):
+    files = gdrive.ListFile({'q': f"'{gid}' in parents and trashed=false and title='{name}'"}).GetList()
+    return files
+
+def getFiles(ref, todownload):
+    for filename in ref:
+        print(filename)
+        if "subFiles" in ref[filename]: # It's a folder
+            if not os.path.isdir(todownload+"\\"+filename):
+                os.mkdir(todownload+"\\"+filename)
+            else:
+                raise Exception(f"The dir {todownload}\\{filename} already exists")
+            getFiles(ref[filename]["subFiles"], todownload+"\\"+filename)
+        else:
+            #print(filename)
+            file = gdrive.CreateFile({"id": ref[filename]["gid"]})
+            file.GetContentFile(todownload+"\\"+filename)
+
+class BackupHandler(FileSystemEventHandler):
+    def __init__(self, info):
+        self.info = info
+
+        self.forced = list()
+        self.obs = Observer()
+        self.obs.schedule(self, path=self.info.path, recursive=True)
+        self.obs.start()
+
+    def backup(self):
+        forced = self.forced.copy()
+        self.forced.clear()
+        print(forced)
+
+        ref = dict()
+        lastref = getref(self.info.gid, self.info.ver-1)
+        # given a google drive id, the version folder is cretated
+        verFol = gdrive.CreateFile({'title': str(self.info.ver), "parents":  [{"id":  self.info.gid}], "mimeType": "application/vnd.google-apps.folder"})
+        verFol.Upload()
+
+        # given the version folder id, the content folder
+        contentFol = gdrive.CreateFile({'title': "content", "parents":  [{"id": verFol["id"]}], "mimeType": "application/vnd.google-apps.folder"})
+        contentFol.Upload()
+
+        backup(self.info.path, contentFol["id"], ref, lastref, self.info.ver, forced)
+
+        # The ref json is uploaded
+        refJSON = gdrive.CreateFile({'title': "ref.json", "parents":  [{"id": verFol["id"]}]})
+        refJSON.SetContentString(json.dumps(ref))
+        refJSON.Upload()
+
+        self.info.ver += 1
+        self.info.save()
+
+    def download(self, path, ver):
+        ref = getref(self.info.gid, ver)
+        name = [f.GetContentString() for f in getDriveFileByName(self.info.gid, "name")][0]
+        path += "\\"+name
+        if os.path.isdir(path):
+            raise Exception(f"The dir {path} already exists")
+
+        os.mkdir(path)
+        getFiles(ref, path)
+
+    def on_modified(self, event):
+        if not event.is_directory:
+            if not event.src_path in self.forced:
+                self.forced.append(event.src_path)
+
+    def destroy(self):
+        self.obs.stop()
+        self.obs.join()
+        print(self.info)
+
 if __name__ == "__main__":
-    ver = 2
-    gid = "1oEmPfLgLL9y3Rn3PFnkPEkU4NwkkCnD2"
+    print("The program is ready")
+    # start
+    h = list()
+    for info in models.Backup.objects.all():
+        bakhandler = BackupHandler(info)
+        h.append(bakhandler)
 
-    # given a google drive id, the version folder is cretated
-    verFol = gdrive.CreateFile({'title': str(ver), "parents":  [{"id": gid}], "mimeType": "application/vnd.google-apps.folder"})
-    verFol.Upload()
+    while True:
+        try:
+            data = input("")
+            if data == "bak":
+                for bakhandler in h:
+                    print("backup started from", bakhandler.info.path, "to", bakhandler.info.gid)
+                    bakhandler.backup()
+                    print("backup ended from", bakhandler.info.path, "to", bakhandler.info.gid)
 
-    # given the version folder id, the content folder
-    contentFol = gdrive.CreateFile({'title': "content", "parents":  [{"id": verFol["id"]}], "mimeType": "application/vnd.google-apps.folder"})
-    contentFol.Upload()
+            if data.split(" ")[0] == "down":
+                for bakhandler in h:
+                    print("download started from", bakhandler.info.gid, "to", bakhandler.info.path)
+                    bakhandler.download(data.split(" ")[1], data.split(" ")[2])
+                    print("download ended from", bakhandler.info.gid, "to", bakhandler.info.path)
 
-    ref = dict()
-    lastref = {
-        '1': {'gid': '1g6oOfuObtfk-jmGFZhYGbJBQ-ykzDHeR', 'ver': 1, 'subFiles': {
-            '2222.txt': {'gid': '1tHOI0yGN5Pf0FpNFbqAMKhEazFOfYvLJ', 'ver': 1}, 
-            '27272': {'gid': '15iqbV9KMuJ-mSJBt2yeteuToqwvIt95J', 'ver': 1, 'subFiles': {
-                '3232': {'gid': '1s-x5_9oBkEYbztBm9M33tRQ-89lgz7NA', 'ver': 1, 'subFiles': {}}, 
-                'asdfghjk.js': {'gid': '1EQ7tjz1zZO-UPAMikMclYzUVaLFLgBfo', 'ver': 1}, 
-                'sksksks.py': {'gid': '139kYJQ2KiNhBO7P1i-djCUTS8_FFhfdW', 'ver': 1}, 
-                'ssssssss1': {'gid': '1J7W9TznbJrYsctyhEPMZF867NyxeScvv', 'ver': 1, 'subFiles': {
-                    '2.c': {'gid': '1Mm6ebKLbBnBQWRgCN36DBY1PkRN5Ne0O', 'ver': 1}, 
-                    '3.c': {'gid': '1ABPPV835SJnaxIAbhXlfvJG6Fmj4RanP', 'ver': 1}}}}}, 
-            'jsjsjsk.txt': {'gid': '1c8au_5oLZP7OObijv4fx54Fk1YrTHo8Q', 'ver': 1}, 
-            'new.java': {'gid': '1KltCjw4qsBFgGNGIwDzfLqwoTbecw01V', 'ver': 1}}}, 
-        'a.txt': {'gid': '15fKSoCJ9tKFLlGAlD14ftQKhGrGcGI0R', 'ver': 1}, 
-        'b.txt': {'gid': '1peD9Z8T8BP80V8XfgqU9Gu6NixdiX3JF', 'ver': 1}, 
-        'c.txt': {'gid': '1KQS19PqozfIrQCuWkI1xmOUplNVQq8I0', 'ver': 1}, 
-        'd111.txt': {'gid': '1BAXFrsmOq02aPQvrNoZIp7r1vIixt3i3', 'ver': 1},
-        'no2': {'gid': '1as9wQLeKnFc8YvLJ9nG7QdPm3MoNEDP-', 'ver': 1}
-        }
+        except KeyboardInterrupt:
+            break
 
-    forced = [r"C:\Users\Lenovo-PC\Desktop\scripts\AutoBackup\wathF\a.txt", r"C:\Users\Lenovo-PC\Desktop\scripts\AutoBackup\wathF\1\27272\asdfghjk.js"]
-    
-    backup(r"C:\Users\Lenovo-PC\Desktop\scripts\AutoBackup\wathF", contentFol["id"], ref, ver, lastref, forced)
-    print(ref)
-    
+    # stop
+    for bakhandler in h:
+        bakhandler.destroy()
