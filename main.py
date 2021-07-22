@@ -1,168 +1,131 @@
-import sys, os, django
-sys.dont_write_bytecode = True 
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "settings") 
-django.setup()
+import os, json, threading, shutil
 
-from db import models
+def backup(src, dest, modified, banned, ref, prevref, ver):
+    for entry in os.scandir(src):
+        print(entry.name)
+        if not entry.path in banned: # If the entry is not banned
+            # If the entry is a folder
+            if entry.isdir(): 
+                ref[entry.name] = {}
+                bakFolder = os.path.join(dest, entry.name)
+                # The entry is in the last backup
+                if entry.name in prevref and isinstance(prevref[entry.name], dict):
+                    backup(entry.name, bakFolder, modified, banned, ref[entry.name], prevref[entry.name], ver)
 
-# TODO: check the forced files was cleaned after each bakup
-
-import json
-from pydrive.auth import GoogleAuth
-from pydrive.drive import GoogleDrive
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
-gauth = GoogleAuth()
-gauth.LocalWebserverAuth()
-gdrive = GoogleDrive(gauth)
-
-def backup(path, gid, ref, lastref, ver, forced):
-    for filename in os.listdir(path):
-        print(filename)
-        if os.path.isdir(path+"\\"+filename):
-            """
-            If the filename it's a folder, we create the folder and then check if the filename exists in the previous bakup,
-            if it exixst then we compare if both (The actual file and the previous) are folders, if this situation it's true
-            then we use recursion using the previous folder in 'lastref', else, we pass an empty dict.
-            """
-            gfolder = gdrive.CreateFile({'title': filename, "parents":  [{"id": gid}], "mimeType": "application/vnd.google-apps.folder"})
-            gfolder.Upload()
-
-            ref[filename] = {"gid": gfolder["id"], "subFiles": {}}
-            if filename in lastref and "subFiles" in lastref[filename]: # The folder it's in the prev bak and not present changes
-                backup(path+"\\"+filename, gfolder["id"], ref[filename]["subFiles"], lastref[filename]["subFiles"], ver, forced)
-
+                else:
+                    backup(entry.name, bakFolder, modified, banned, ref[entry.name], {}, ver)
+            
+            # Else the entry is a file
             else:
-                backup(path+"\\"+filename, gfolder["id"], ref[filename]["subFiles"], {}, ver, forced)
+                # The entry is in the previous backup and the entry wasn't modified
+                if (entry.name in prevref and isinstance(prevref[entry.name], str)) and not entry.path in modified:
+                    # instahead of backup the file, we use his previous version
+                    ref[entry.name] = prevref[entry.name]
 
-        else:
-            """
-            if the local filename is a file, then whe check the filename exists in the previous backup,
-            if the filename exists then whe check if is a file or a folder, if it's a file whe reuse his 
-            ref info, else, whe upload the file and create a new ref info.
-            """
+                else:
+                    # Backup the file
+                    bakFile = shutil.copyfile(entry.path, os.path.join(dest, entry.name))
+                    ref[entry.name] = bakFile
 
-            # |-------------NOT IN FORCED---------AND------------------------IN LAST BACKUP---------------------|
-            if not path+"\\"+filename in forced and filename in lastref and not "subFiles" in lastref[filename]:
-                ref[filename] = lastref[filename]
 
-            else:
-                gfile = gdrive.CreateFile({"title": filename, "parents": [{"id": gid}]})
-                gfile.SetContentFile(path+"\\"+filename)
-                gfile.Upload()
+#########################################
+class DeviceSource(): # Extends from Source
+    """
+    An object that can make backups
 
-                ref[filename] = {"gid": gfile["id"], "ver": ver}
+    --Attr--
+    path: str
+        the root path used for make backups
 
-def getref(gid, ver):
-    prevFol = gdrive.ListFile({'q': f"'{gid}' in parents and trashed=false and title='{ver}'"}).GetList()
-    if prevFol:
-        prevFol = prevFol[0]["id"]
-        lastref = gdrive.ListFile({'q': f"'{prevFol}' in parents and trashed=false and title='ref.json'"}).GetList()
-        if lastref:
-            lastref = lastref[0].GetContentString()
-            if lastref:
-                lastref = json.loads(lastref)
-                return lastref
-    return dict()
+    """
+    def __init__(self, path):
+        self.path = path
 
-def getDriveFileByName(gid, name):
-    files = gdrive.ListFile({'q': f"'{gid}' in parents and trashed=false and title='{name}'"}).GetList()
-    return files
+    def backup(self, repo):
+        with os.scandir(self.path) as folder:
+            for entry in folder:
+                pass
 
-def getFiles(ref, todownload):
-    for filename in ref:
-        print(filename)
-        if "subFiles" in ref[filename]: # It's a folder
-            if not os.path.isdir(todownload+"\\"+filename):
-                os.mkdir(todownload+"\\"+filename)
-            else:
-                raise Exception(f"The dir {todownload}\\{filename} already exists")
-            getFiles(ref[filename]["subFiles"], todownload+"\\"+filename)
-        else:
-            #print(filename)
-            file = gdrive.CreateFile({"id": ref[filename]["gid"]})
-            file.GetContentFile(todownload+"\\"+filename)
+    def __handle(src, dest):
+        with os.scandir(src) as folder:
+            for entry in folder:
+                if not entry in self.banned:
+                    if entry.isdir():
+                        pass
 
-class BackupHandler(FileSystemEventHandler):
-    def __init__(self, info):
-        self.info = info
+                    else:
+                        repo.upload(entry, "shutil.copy(file, dest)")
 
-        self.forced = list()
-        self.obs = Observer()
-        self.obs.schedule(self, path=self.info.path, recursive=True)
-        self.obs.start()
+
+class DeviceRepository(): # Extends from Repository
+    def __init__(self):
+        pass
+
+    def restore(self, version):
+        pass
+
+
+class BackupEvent():
+    def __init__():
+        pass
+        for version in repo:
+            for file in version:
+                pass
+
 
     def backup(self):
-        forced = self.forced.copy()
-        self.forced.clear()
-        print(forced)
+        for src in self.__srcs:
+            for repo in self.__repos:
+                src.backup(repo)
 
-        ref = dict()
-        lastref = getref(self.info.gid, self.info.ver-1)
-        # given a google drive id, the version folder is cretated
-        verFol = gdrive.CreateFile({'title': str(self.info.ver), "parents":  [{"id":  self.info.gid}], "mimeType": "application/vnd.google-apps.folder"})
-        verFol.Upload()
+class A():
+    def __iter__(self):
+        return Iter()
 
-        # given the version folder id, the content folder
-        contentFol = gdrive.CreateFile({'title': "content", "parents":  [{"id": verFol["id"]}], "mimeType": "application/vnd.google-apps.folder"})
-        contentFol.Upload()
+class Iter():
+    def __init__(self):
+        self.i = 0
 
-        backup(self.info.path, contentFol["id"], ref, lastref, self.info.ver, forced)
+    def __next__(self):
+        self.i += 1
+        if self.i > 10:
+            raise StopIteration
 
-        # The ref json is uploaded
-        refJSON = gdrive.CreateFile({'title': "ref.json", "parents":  [{"id": verFol["id"]}]})
-        refJSON.SetContentString(json.dumps(ref))
-        refJSON.Upload()
+        return self.i
+            
 
-        self.info.ver += 1
-        self.info.save()
+#########################################
 
-    def download(self, path, ver):
-        ref = getref(self.info.gid, ver)
-        name = [f.GetContentString() for f in getDriveFileByName(self.info.gid, "name")][0]
-        path += "\\"+name
-        if os.path.isdir(path):
-            raise Exception(f"The dir {path} already exists")
+class DeviceRepository():
+    def upload(file):
+        with open(dets) as destFile:
+            destFile.write(file.getContentString())
 
-        os.mkdir(path)
-        getFiles(ref, path)
+    def restore(self, version, where):
+        for file in version:
+            shutil.copy(file, where)
 
-    def on_modified(self, event):
-        if not event.is_directory:
-            if not event.src_path in self.forced:
-                self.forced.append(event.src_path)
+class GoogleDriveRepository():
+    def upload(file):
+        gdriveFile.setComtentString(file.getContentString())
+        gdriveFile.upload()
 
-    def destroy(self):
-        self.obs.stop()
-        self.obs.join()
-        print(self.info)
+    def restore(self, version):
+        for file in version:
+            gdriveFile.getContentFile(where)
+
+class DeviceFile():
+    def getContentString():
+        with open(path) as file
+            return file.read()
+
+class GoogleDriveFile():
+    def getContentString():
+        return gdriveFile.getContentString()
+
 
 if __name__ == "__main__":
-    print("The program is ready")
-    # start
-    h = list()
-    for info in models.Backup.objects.all():
-        bakhandler = BackupHandler(info)
-        h.append(bakhandler)
-
-    while True:
-        try:
-            data = input("")
-            if data == "bak":
-                for bakhandler in h:
-                    print("backup started from", bakhandler.info.path, "to", bakhandler.info.gid)
-                    bakhandler.backup()
-                    print("backup ended from", bakhandler.info.path, "to", bakhandler.info.gid)
-
-            if data.split(" ")[0] == "down":
-                for bakhandler in h:
-                    print("download started from", bakhandler.info.gid, "to", bakhandler.info.path)
-                    bakhandler.download(data.split(" ")[1], data.split(" ")[2])
-                    print("download ended from", bakhandler.info.gid, "to", bakhandler.info.path)
-
-        except KeyboardInterrupt:
-            break
-
-    # stop
-    for bakhandler in h:
-        bakhandler.destroy()
+    for n in A():
+        print(n)
+    
+    print(1 in A())
